@@ -419,6 +419,8 @@ func (s *Server) setupRoutes() {
 	s.engine.HEAD("/healthz", healthzHandler)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	s.engine.GET("/proxies-ui", s.mgmt.ServeProxiesUI)
+	s.engine.GET("/proxies-ui/", s.mgmt.ServeProxiesUI)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
@@ -746,6 +748,13 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+
+		// Proxy pool: list/CRUD plus assign-to-auth. Stored in auth-dir/proxies.json.
+		mgmt.GET("/proxies", s.mgmt.GetProxies)
+		mgmt.POST("/proxies", s.mgmt.PostProxy)
+		mgmt.PUT("/proxies/:id", s.mgmt.PutProxy)
+		mgmt.DELETE("/proxies/:id", s.mgmt.DeleteProxy)
+		mgmt.POST("/proxies/:id/assign", s.mgmt.PostProxyAssign)
 	}
 }
 

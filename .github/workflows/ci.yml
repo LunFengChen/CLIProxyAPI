@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - mydev   # 开发分支：编译验证，不推镜像
+      - main    # main 也跑一遍（docker-build.yml 同步触发，这里只管编译检查）
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: |
+          go build -o /tmp/cpa-test ./cmd/server
+          rm -f /tmp/cpa-test
