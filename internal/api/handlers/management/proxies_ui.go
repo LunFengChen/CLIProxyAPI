@@ -149,25 +149,27 @@ function render() {
 
   const root = document.getElementById('root');
   if (!Object.keys(byGroup).length) { root.innerHTML='<p style="color:var(--muted);margin-top:16px">No proxies yet.</p>'; return; }
-  root.innerHTML = Object.entries(byGroup).sort((a,b)=>a[0].localeCompare(b[0])).map(([g,list])=>`
-    <div class="group-header" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
-      <span>${esc(g)} <span style="color:var(--muted);font-weight:400">(${list.length})</span></span>
-      <span style="font-size:12px;color:var(--muted)">▾ click to collapse</span>
-    </div>
-    <table><thead><tr><th>URL</th><th>Label</th><th>Status</th><th>Assigned to</th><th></th></tr></thead>
-    <tbody>${list.map(p=>`
-      <tr>
-        <td class="url-cell" title="${esc(p.url)}">${esc(p.url)}</td>
-        <td>${esc(p.label||'')}</td>
-        <td>${p.disabled?'<span class="tag tag-red">disabled</span>':p.assigned_to&&p.assigned_to.length?'<span class="tag tag-green">in use</span>':'<span class="tag">idle</span>'}</td>
-        <td style="font-size:12px;color:var(--muted)">${(p.assigned_to||[]).length} account(s)</td>
-        <td style="white-space:nowrap;display:flex;gap:4px;padding:7px 6px">
-          <button class="btn-primary btn-sm" onclick="openAssign('${p.id}')">Assign</button>
-          <button class="btn-sm" style="background:var(--surface);color:var(--text);border:1px solid var(--border)" onclick="openEdit('${p.id}')">Edit</button>
-          <button class="btn-danger btn-sm" onclick="del('${p.id}')">Del</button>
-        </td>
-      </tr>`).join('')}
-    </tbody></table>`).join('');
+  root.innerHTML = Object.entries(byGroup).sort((a,b)=>a[0].localeCompare(b[0])).map(function([g,list]){
+    return '<div class="group-header" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'\':\' none\'">'
+      +'<span>'+esc(g)+' <span style="color:var(--muted);font-weight:400">('+list.length+')</span></span>'
+      +'<span style="font-size:12px;color:var(--muted)">▾ click to collapse</span>'
+      +'</div>'
+      +'<table><thead><tr><th>URL</th><th>Label</th><th>Group</th><th>Status</th><th>Assigned to</th><th></th></tr></thead>'
+      +'<tbody>'+list.map(function(p){
+        return '<tr>'
+          +'<td class="url-cell" title="'+esc(p.url)+'">'+esc(p.url)+'</td>'
+          +'<td>'+esc(p.label||'')+'</td>'
+          +'<td><span class="tag">'+esc(p.group||'')+'</span></td>'
+          +'<td>'+(p.disabled?'<span class="tag tag-red">disabled</span>':(p.assigned_to&&p.assigned_to.length?'<span class="tag tag-green">in use</span>':'<span class="tag">idle</span>'))+'</td>'
+          +'<td style="font-size:12px;color:var(--muted)">'+(p.assigned_to||[]).length+' account(s)</td>'
+          +'<td style="white-space:nowrap;display:flex;gap:4px;padding:7px 6px">'
+          +'<button class="btn-primary btn-sm" onclick="openAssign(\''+p.id+'\')">Assign</button>'
+          +'<button class="btn-sm" style="background:var(--surface);color:var(--text);border:1px solid var(--border)" onclick="openEdit(\''+p.id+'\')">Edit</button>'
+          +'<button class="btn-danger btn-sm" onclick="del(\''+p.id+'\')">Del</button>'
+          +'</td></tr>';
+      }).join('')
+      +'</tbody></table>';
+  }).join('');
   document.getElementById('status').textContent = proxies.length+' proxi'+(proxies.length===1?'y':'es');
 }
 
@@ -200,15 +202,15 @@ function openAssign(id){
   assigningID=id;
   const p=proxies.find(x=>x.id===id);
   const assigned=new Set((p&&p.assigned_to)||[]);
-  document.getElementById('auth-list').innerHTML=allAuths.length?allAuths.map(a=>`
-    <div class="auth-item">
-      <input type="checkbox" id="ck-${esc(a.id)}" value="${esc(a.id)}" ${assigned.has(a.id)?'checked':''}>
-      <label for="ck-${esc(a.id)}" style="cursor:pointer;flex:1">
-        <strong>${esc(a.id)}</strong>
-        ${a.provider?'<span style="color:var(--muted);font-size:11px"> '+esc(a.provider)+'</span>':''}
-        ${a.label?'<span style="color:var(--muted);font-size:11px"> '+esc(a.label)+'</span>':''}
-      </label>
-    </div>`).join(''):'<p style="color:var(--muted)">No auth accounts found.</p>';
+  document.getElementById('auth-list').innerHTML=allAuths.length?allAuths.map(function(a){
+    return '<div class="auth-item">'
+      +'<input type="checkbox" id="ck-'+esc(a.id)+'" value="'+esc(a.id)+'"'+(assigned.has(a.id)?' checked':')+'>'
+      +'<label for="ck-'+esc(a.id)+'" style="cursor:pointer;flex:1">'
+      +'<strong>'+esc(a.id)+'</strong>'
+      +(a.provider?'<span style="color:var(--muted);font-size:11px"> '+esc(a.provider)+'</span>':'')
+      +(a.label?'<span style="color:var(--muted);font-size:11px"> '+esc(a.label)+'</span>':'')
+      +'</label></div>';
+  }).join(''):'<p style="color:var(--muted)">No auth accounts found.</p>';
   document.getElementById('auth-filter').value='';
   document.getElementById('assign-err').textContent='';
   document.getElementById('modal-assign').classList.add('open');

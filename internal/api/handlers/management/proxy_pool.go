@@ -1,9 +1,11 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,6 +126,51 @@ func assignedToMap(auths []*coreauth.Auth) map[string][]string {
 
 // ---- HTTP handlers ----
 
+// detectProxyRegion dials ipinfo.io/json through the given proxy URL and returns
+// a "COUNTRY:Region" label (e.g. "US:California").  Returns "" on any failure
+// (best-effort; callers should not block on this).
+func detectProxyRegion(ctx context.Context, proxyURL string) string {
+	transport := &http.Transport{}
+	if proxyURL != "" {
+		parsed, err := url.Parse(proxyURL)
+		if err == nil {
+			transport.Proxy = http.ProxyURL(parsed)
+		}
+	}
+	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://ipinfo.io/json", nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			// best-effort; ignore
+		}
+	}()
+	var info struct {
+		Country string `json:"country"`
+		Region  string `json:"region"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return ""
+	}
+	switch {
+	case info.Country != "" && info.Region != "":
+		return info.Country + ":" + info.Region
+	case info.Country != "":
+		return info.Country
+	case info.Region != "":
+		return info.Region
+	default:
+		return ""
+	}
+}
+
 // GetProxies handles GET /v0/management/proxies
 func (h *Handler) GetProxies(c *gin.Context) {
 	store, err := h.proxyStoreForHandler()
@@ -185,6 +232,35 @@ func (h *Handler) PostProxy(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+
+	// Auto-detect region via ipinfo.io if the caller did not provide one.
+	// This is done after the save so the proxy is persisted even if geo lookup fails.
+	if req.Group == "" {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			region := detectProxyRegion(ctx, req.URL)
+			if region == "" {
+				return
+			}
+			entries2, err := store.load()
+			if err != nil {
+				return
+			}
+			updated := false
+			for i, e := range entries2 {
+				if e.ID == req.ID && e.Group == "" {
+					entries2[i].Group = region
+					updated = true
+					break
+				}
+			}
+			if updated {
+				_ = store.save(entries2)
+			}
+		}()
+	}
+
 	c.JSON(http.StatusCreated, req)
 }
 
