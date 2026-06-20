@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 // ProxyEntry represents a single proxy in the pool.
@@ -102,6 +103,11 @@ func (s *proxyStore) save(entries []ProxyEntry) error {
 var handlerProxyStores sync.Map // key: *Handler → *proxyStoreCache
 
 var proxyIPInfoURL = "https://ipinfo.io/json"
+
+const (
+	proxyPoolHealthCheckInterval = 5 * time.Minute
+	proxyPoolPerProxyTimeout     = 15 * time.Second
+)
 
 type proxyStoreCache struct {
 	once  sync.Once
@@ -194,6 +200,23 @@ func (a *proxyAllocator) Next() string {
 // persisted proxy pool. Empty return means the import should proceed unproxied.
 func (h *Handler) pickProxyURLForImportedAuth() string {
 	return h.newProxyAllocator().Next()
+}
+
+func (h *Handler) startProxyPoolHealthLoop() {
+	if h == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(proxyPoolHealthCheckInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			ctx, cancel := context.WithTimeout(context.Background(), proxyPoolHealthCheckInterval)
+			if err := h.refreshProxyPoolOnce(ctx); err != nil {
+				log.WithError(err).Warn("management: proxy pool health check failed")
+			}
+			cancel()
+		}
+	}()
 }
 
 func normalizeProxyURL(raw string) (string, error) {
@@ -343,10 +366,139 @@ func detectProxyInfo(ctx context.Context, proxyURL string) proxyCheckResult {
 
 func (h *Handler) startProxyCheck(store *proxyStore, id, proxyURL string) {
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), proxyPoolPerProxyTimeout)
 		defer cancel()
 		_ = h.refreshProxyInfo(ctx, store, id, proxyURL)
 	}()
+}
+
+func (h *Handler) refreshProxyPoolOnce(ctx context.Context) error {
+	store, err := h.proxyStoreForHandler()
+	if err != nil {
+		return err
+	}
+	entries, err := store.load()
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		proxyURL := strings.TrimSpace(entry.URL)
+		if proxyURL == "" || entry.Disabled {
+			continue
+		}
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+		}
+		checkCtx := ctx
+		cancel := func() {}
+		if checkCtx == nil {
+			checkCtx = context.Background()
+		}
+		checkCtx, cancel = context.WithTimeout(checkCtx, proxyPoolPerProxyTimeout)
+		errRefresh := h.refreshProxyInfo(checkCtx, store, entry.ID, proxyURL)
+		cancel()
+		if errRefresh != nil {
+			return errRefresh
+		}
+
+		latest, errLoad := store.load()
+		if errLoad != nil {
+			return errLoad
+		}
+		if !proxyEntryAvailable(latest, entry.ID) {
+			if _, errReassign := h.reassignAuthsFromProxy(ctx, proxyURL, latest); errReassign != nil {
+				return errReassign
+			}
+		}
+	}
+	return nil
+}
+
+func proxyEntryAvailable(entries []ProxyEntry, id string) bool {
+	for _, entry := range entries {
+		if entry.ID != id {
+			continue
+		}
+		return entry.Available == nil || *entry.Available
+	}
+	return false
+}
+
+func activeProxyEntriesExcept(entries []ProxyEntry, excludedURL string) []ProxyEntry {
+	active := activeProxyEntries(entries)
+	if strings.TrimSpace(excludedURL) == "" {
+		return active
+	}
+	out := active[:0]
+	for _, entry := range active {
+		if strings.TrimSpace(entry.URL) == excludedURL {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func pickLeastAssignedProxy(candidates []ProxyEntry, assigned map[string]int) (ProxyEntry, bool) {
+	if len(candidates) == 0 {
+		return ProxyEntry{}, false
+	}
+	best := candidates[0]
+	bestCount := assigned[best.URL]
+	for _, candidate := range candidates[1:] {
+		count := assigned[candidate.URL]
+		if count < bestCount {
+			best = candidate
+			bestCount = count
+		}
+	}
+	return best, true
+}
+
+func (h *Handler) reassignAuthsFromProxy(ctx context.Context, failedProxyURL string, entries []ProxyEntry) (int, error) {
+	failedProxyURL = strings.TrimSpace(failedProxyURL)
+	if h == nil || h.authManager == nil || failedProxyURL == "" {
+		return 0, nil
+	}
+	candidates := activeProxyEntriesExcept(entries, failedProxyURL)
+	if len(candidates) == 0 {
+		return 0, nil
+	}
+
+	auths := h.authManager.List()
+	assignedCount := map[string]int{}
+	for url, ids := range assignedToMap(auths) {
+		assignedCount[url] = len(ids)
+	}
+
+	now := time.Now()
+	updated := 0
+	for _, auth := range auths {
+		if auth == nil || strings.TrimSpace(auth.ProxyURL) != failedProxyURL {
+			continue
+		}
+		best, ok := pickLeastAssignedProxy(candidates, assignedCount)
+		if !ok {
+			break
+		}
+		auth.ProxyURL = best.URL
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		auth.Metadata["proxy_url"] = best.URL
+		auth.UpdatedAt = now
+		if _, err := h.authManager.Update(ctx, auth); err != nil {
+			return updated, fmt.Errorf("update auth %s proxy: %w", auth.ID, err)
+		}
+		assignedCount[failedProxyURL]--
+		assignedCount[best.URL]++
+		updated++
+	}
+	return updated, nil
 }
 
 func (h *Handler) refreshProxyInfo(ctx context.Context, store *proxyStore, id, proxyURL string) error {

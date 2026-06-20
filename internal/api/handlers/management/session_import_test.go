@@ -402,6 +402,114 @@ func TestProxyAutoAssignAssignsOnlyAuthsWithoutProxy(t *testing.T) {
 	}
 }
 
+func TestProxyPoolHealthCheckReassignsAuthsFromUnavailableProxy(t *testing.T) {
+	oldURL := proxyIPInfoURL
+	proxyIPInfoURL = "http://ipinfo.io/json"
+	t.Cleanup(func() { proxyIPInfoURL = oldURL })
+
+	badProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "proxy expired", http.StatusBadGateway)
+	}))
+	defer badProxy.Close()
+	goodProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.String() != proxyIPInfoURL {
+			t.Fatalf("proxy target = %s", r.URL.String())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ip":"38.111.61.59","country":"US","region":"Illinois","city":"Chicago"}`))
+	}))
+	defer goodProxy.Close()
+
+	authDir := t.TempDir()
+	store, err := newProxyStore(authDir)
+	if err != nil {
+		t.Fatalf("proxy store: %v", err)
+	}
+	available := true
+	if err := store.save([]ProxyEntry{
+		{ID: "bad", URL: badProxy.URL, Available: &available},
+		{ID: "good", URL: goodProxy.URL, Available: &available},
+	}); err != nil {
+		t.Fatalf("save proxies: %v", err)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	for _, auth := range []*coreauth.Auth{
+		{ID: "a1", FileName: "a1.json", Provider: "codex", ProxyURL: badProxy.URL, Metadata: map[string]any{"proxy_url": badProxy.URL}},
+		{ID: "a2", FileName: "a2.json", Provider: "codex", ProxyURL: badProxy.URL, Metadata: map[string]any{"proxy_url": badProxy.URL}},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register %s: %v", auth.ID, err)
+		}
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	if err := h.refreshProxyPoolOnce(context.Background()); err != nil {
+		t.Fatalf("refresh proxy pool: %v", err)
+	}
+
+	entries, err := store.load()
+	if err != nil {
+		t.Fatalf("load proxies: %v", err)
+	}
+	if len(entries) != 2 || entries[0].Available == nil || *entries[0].Available {
+		t.Fatalf("bad proxy should be marked unavailable: %#v", entries)
+	}
+	for _, id := range []string{"a1", "a2"} {
+		auth, ok := manager.GetByID(id)
+		if !ok {
+			t.Fatalf("missing auth %s", id)
+		}
+		if auth.ProxyURL != goodProxy.URL {
+			t.Fatalf("%s proxy = %q, want %q", id, auth.ProxyURL, goodProxy.URL)
+		}
+		if got := auth.Metadata["proxy_url"]; got != goodProxy.URL {
+			t.Fatalf("%s metadata proxy_url = %#v, want %q", id, got, goodProxy.URL)
+		}
+	}
+}
+
+func TestProxyPoolHealthCheckKeepsAuthsWhenNoReplacementProxy(t *testing.T) {
+	oldURL := proxyIPInfoURL
+	proxyIPInfoURL = "http://ipinfo.io/json"
+	t.Cleanup(func() { proxyIPInfoURL = oldURL })
+
+	badProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "proxy expired", http.StatusBadGateway)
+	}))
+	defer badProxy.Close()
+
+	authDir := t.TempDir()
+	store, err := newProxyStore(authDir)
+	if err != nil {
+		t.Fatalf("proxy store: %v", err)
+	}
+	available := true
+	if err := store.save([]ProxyEntry{{ID: "bad", URL: badProxy.URL, Available: &available}}); err != nil {
+		t.Fatalf("save proxies: %v", err)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: "a1", FileName: "a1.json", Provider: "codex", ProxyURL: badProxy.URL, Metadata: map[string]any{"proxy_url": badProxy.URL},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	if err := h.refreshProxyPoolOnce(context.Background()); err != nil {
+		t.Fatalf("refresh proxy pool: %v", err)
+	}
+
+	auth, ok := manager.GetByID("a1")
+	if !ok {
+		t.Fatal("missing auth a1")
+	}
+	if auth.ProxyURL != badProxy.URL {
+		t.Fatalf("auth proxy = %q, want preserved %q", auth.ProxyURL, badProxy.URL)
+	}
+}
+
 func strconvQuote(value string) string {
 	raw, _ := json.Marshal(value)
 	return string(raw)
