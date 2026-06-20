@@ -589,7 +589,7 @@ func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
 	return &scheduledAuthMeta{
 		auth:              auth,
 		providerKey:       providerKey,
-		priority:          authPriority(auth),
+		priority:          authPriorityAt(auth, time.Now()),
 		virtualParent:     virtualParent,
 		websocketEnabled:  authWebsocketsEnabled(auth),
 		supportedModelSet: supportedModelSetForAuth(auth.ID),
@@ -659,6 +659,7 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 	modelKey = canonicalModelKey(modelKey)
 	if shard, ok := p.modelShards[modelKey]; ok && shard != nil {
 		shard.promoteExpiredLocked(now)
+		shard.refreshDynamicPrioritiesLocked(now)
 		return shard
 	}
 	shard := &modelScheduler{
@@ -780,12 +781,35 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 	}
 }
 
+func (m *modelScheduler) refreshDynamicPrioritiesLocked(now time.Time) {
+	if m == nil {
+		return
+	}
+	changed := false
+	for _, entry := range m.entries {
+		if entry == nil || entry.auth == nil || entry.meta == nil {
+			continue
+		}
+		nextPriority := authPriorityAt(entry.auth, now)
+		if entry.meta.priority == nextPriority {
+			continue
+		}
+		entry.meta.priority = nextPriority
+		changed = true
+	}
+	if changed {
+		m.rebuildIndexesLocked()
+	}
+}
+
 // pickReadyLocked selects the next ready auth from the highest available priority bucket.
 func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
 	if m == nil {
 		return nil
 	}
-	m.promoteExpiredLocked(time.Now())
+	now := time.Now()
+	m.promoteExpiredLocked(now)
+	m.refreshDynamicPrioritiesLocked(now)
 	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, predicate)
 	if !okPriority {
 		return nil

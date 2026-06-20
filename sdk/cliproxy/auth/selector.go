@@ -35,6 +35,11 @@ type RoundRobinSelector struct {
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
 
+const (
+	expiringAuthPriorityBoost  = 100_000
+	expiringAuthPriorityWindow = 48 * time.Hour
+)
+
 type blockReason int
 
 const (
@@ -114,6 +119,18 @@ func (e *modelCooldownError) Headers() http.Header {
 }
 
 func authPriority(auth *Auth) int {
+	return authPriorityAt(auth, time.Now())
+}
+
+func authPriorityAt(auth *Auth, now time.Time) int {
+	priority := authBasePriority(auth)
+	if authExpiresSoon(auth, now) {
+		priority += expiringAuthPriorityBoost
+	}
+	return priority
+}
+
+func authBasePriority(auth *Auth) int {
 	if auth == nil || auth.Attributes == nil {
 		return 0
 	}
@@ -126,6 +143,36 @@ func authPriority(auth *Auth) int {
 		return 0
 	}
 	return parsed
+}
+
+func authExpiresSoon(auth *Auth, now time.Time) bool {
+	expiresAt, ok := authSchedulingExpirationTime(auth)
+	if !ok || expiresAt.IsZero() {
+		return false
+	}
+	if expiresAt.Before(now) {
+		return false
+	}
+	return expiresAt.Sub(now) <= expiringAuthPriorityWindow
+}
+
+func authSchedulingExpirationTime(auth *Auth) (time.Time, bool) {
+	if auth == nil {
+		return time.Time{}, false
+	}
+	if ts, ok := auth.ExpirationTime(); ok {
+		return ts, true
+	}
+	if auth.Metadata != nil {
+		return lookupMetadataTime(
+			auth.Metadata,
+			"chatgpt_subscription_active_until",
+			"chatgptSubscriptionActiveUntil",
+			"subscription_active_until",
+			"subscriptionActiveUntil",
+		)
+	}
+	return time.Time{}, false
 }
 
 func canonicalModelKey(model string) string {
@@ -203,7 +250,7 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 		candidate := auths[i]
 		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
 		if !blocked {
-			priority := authPriority(candidate)
+			priority := authPriorityAt(candidate, now)
 			available[priority] = append(available[priority], candidate)
 			continue
 		}

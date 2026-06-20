@@ -124,6 +124,68 @@ func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_PrefersAuthExpiringSoon(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:       "normal-a",
+			Provider: "codex",
+			Metadata: map[string]any{"expired": time.Now().Add(7 * 24 * time.Hour).Format(time.RFC3339)},
+		},
+		&Auth{
+			ID:       "expiring-z",
+			Provider: "codex",
+			Metadata: map[string]any{"expired": time.Now().Add(12 * time.Hour).Format(time.RFC3339)},
+		},
+		&Auth{
+			ID:       "normal-b",
+			Provider: "codex",
+			Metadata: map[string]any{"expired": time.Now().Add(7 * 24 * time.Hour).Format(time.RFC3339)},
+		},
+	)
+
+	for index := 0; index < 3; index++ {
+		got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil || got.ID != "expiring-z" {
+			t.Fatalf("pickSingle() #%d auth = %v, want expiring-z", index, got)
+		}
+	}
+}
+
+func TestSchedulerPick_RoundRobinsWhenNoAuthExpiresSoon(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:       "normal-a",
+			Provider: "codex",
+			Metadata: map[string]any{"expired": time.Now().Add(7 * 24 * time.Hour).Format(time.RFC3339)},
+		},
+		&Auth{
+			ID:       "normal-b",
+			Provider: "codex",
+			Metadata: map[string]any{"expired": time.Now().Add(8 * 24 * time.Hour).Format(time.RFC3339)},
+		},
+	)
+
+	want := []string{"normal-a", "normal-b", "normal-a"}
+	for index, wantID := range want {
+		got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil || got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth = %v, want %s", index, got, wantID)
+		}
+	}
+}
+
 func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 	t.Parallel()
 
