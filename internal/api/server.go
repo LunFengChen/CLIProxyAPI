@@ -419,8 +419,6 @@ func (s *Server) setupRoutes() {
 	s.engine.HEAD("/healthz", healthzHandler)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
-	s.engine.GET("/proxies-ui", s.mgmt.ServeProxiesUI)
-	s.engine.GET("/proxies-ui/", s.mgmt.ServeProxiesUI)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
@@ -735,6 +733,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
+		mgmt.POST("/auth-files/import-session-text", s.mgmt.ImportSessionText)
+		mgmt.POST("/auth-files/normalize-names", s.mgmt.PostNormalizeAuthFileNames)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
@@ -752,6 +752,7 @@ func (s *Server) registerManagementRoutes() {
 		// Proxy pool: list/CRUD plus assign-to-auth. Stored in auth-dir/proxies.json.
 		mgmt.GET("/proxies", s.mgmt.GetProxies)
 		mgmt.POST("/proxies", s.mgmt.PostProxy)
+		mgmt.POST("/proxies/auto-assign", s.mgmt.PostProxyAutoAssign)
 		mgmt.PUT("/proxies/:id", s.mgmt.PutProxy)
 		mgmt.DELETE("/proxies/:id", s.mgmt.DeleteProxy)
 		mgmt.POST("/proxies/:id/assign", s.mgmt.PostProxyAssign)

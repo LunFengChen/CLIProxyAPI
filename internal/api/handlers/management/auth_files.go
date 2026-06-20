@@ -943,6 +943,10 @@ func (h *Handler) storeUploadedAuthFile(ctx context.Context, file *multipart.Fil
 }
 
 func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) error {
+	data, err := h.applyProxyPoolToAuthFileData(data)
+	if err != nil {
+		return err
+	}
 	dst := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
 	if !filepath.IsAbs(dst) {
 		if abs, errAbs := filepath.Abs(dst); errAbs == nil {
@@ -960,6 +964,27 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 		return err
 	}
 	return nil
+}
+
+func (h *Handler) applyProxyPoolToAuthFileData(data []byte) ([]byte, error) {
+	metadata := make(map[string]any)
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return data, err
+	}
+	if proxyURL, ok := metadata["proxy_url"].(string); ok && strings.TrimSpace(proxyURL) != "" {
+		return data, nil
+	}
+	proxyURL := h.pickProxyURLForImportedAuth()
+	if proxyURL == "" {
+		return data, nil
+	}
+	metadata["proxy_url"] = proxyURL
+	raw, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return data, err
+	}
+	raw = append(raw, '\n')
+	return raw, nil
 }
 
 func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
@@ -1175,6 +1200,9 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 		Metadata:   metadata,
 		CreatedAt:  time.Now(),
 		UpdatedAt:  time.Now(),
+	}
+	if proxyURL, ok := metadata["proxy_url"].(string); ok {
+		auth.ProxyURL = strings.TrimSpace(proxyURL)
 	}
 	if hasLastRefresh {
 		auth.LastRefreshedAt = lastRefresh

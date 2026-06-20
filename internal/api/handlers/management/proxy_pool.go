@@ -21,11 +21,18 @@ import (
 // ProxyEntry represents a single proxy in the pool.
 // group is a free-text label used only for UI grouping (e.g. "US-California").
 type ProxyEntry struct {
-	ID       string `json:"id"`
-	URL      string `json:"url"`
-	Group    string `json:"group,omitempty"`
-	Label    string `json:"label,omitempty"`
-	Disabled bool   `json:"disabled,omitempty"`
+	ID          string `json:"id"`
+	URL         string `json:"url"`
+	Group       string `json:"group,omitempty"`
+	Label       string `json:"label,omitempty"`
+	Disabled    bool   `json:"disabled,omitempty"`
+	Available   *bool  `json:"available,omitempty"`
+	CheckError  string `json:"check_error,omitempty"`
+	LastChecked string `json:"last_checked,omitempty"`
+	IP          string `json:"ip,omitempty"`
+	Country     string `json:"country,omitempty"`
+	Region      string `json:"region,omitempty"`
+	City        string `json:"city,omitempty"`
 }
 
 // proxyPoolResponse augments a ProxyEntry with derived assigned_to list.
@@ -94,6 +101,8 @@ func (s *proxyStore) save(entries []ProxyEntry) error {
 
 var handlerProxyStores sync.Map // key: *Handler → *proxyStoreCache
 
+var proxyIPInfoURL = "https://ipinfo.io/json"
+
 type proxyStoreCache struct {
 	once  sync.Once
 	store *proxyStore
@@ -124,28 +133,166 @@ func assignedToMap(auths []*coreauth.Auth) map[string][]string {
 	return m
 }
 
+func activeProxyEntries(entries []ProxyEntry) []ProxyEntry {
+	out := make([]ProxyEntry, 0, len(entries))
+	for _, entry := range entries {
+		entry.URL = strings.TrimSpace(entry.URL)
+		if entry.URL == "" || entry.Disabled || (entry.Available != nil && !*entry.Available) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// pickProxyURLForImportedAuth chooses the least-assigned enabled proxy from the
+// persisted proxy pool. Empty return means the import should proceed unproxied.
+func (h *Handler) pickProxyURLForImportedAuth() string {
+	store, err := h.proxyStoreForHandler()
+	if err != nil {
+		return ""
+	}
+	entries, err := store.load()
+	if err != nil {
+		return ""
+	}
+	candidates := activeProxyEntries(entries)
+	if len(candidates) == 0 {
+		return ""
+	}
+
+	assigned := map[string]int{}
+	if h != nil && h.authManager != nil {
+		for url, ids := range assignedToMap(h.authManager.List()) {
+			assigned[url] = len(ids)
+		}
+	}
+
+	best := candidates[0]
+	bestCount := assigned[best.URL]
+	for _, candidate := range candidates[1:] {
+		count := assigned[candidate.URL]
+		if count < bestCount {
+			best = candidate
+			bestCount = count
+		}
+	}
+	return best.URL
+}
+
+func normalizeProxyURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	if !strings.Contains(raw, "://") {
+		if strings.Count(raw, ":") >= 3 && !strings.Contains(raw, "@") {
+			parts := strings.SplitN(raw, ":", 4)
+			if len(parts) == 4 && parts[0] != "" && parts[1] != "" {
+				u := &url.URL{
+					Scheme: "socks5",
+					User:   url.UserPassword(parts[2], parts[3]),
+					Host:   parts[0] + ":" + parts[1],
+				}
+				raw = u.String()
+			} else {
+				raw = "socks5://" + raw
+			}
+		} else {
+			raw = "socks5://" + raw
+		}
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid proxy url")
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return "", fmt.Errorf("unsupported proxy scheme %q", parsed.Scheme)
+	}
+	return parsed.String(), nil
+}
+
+func (h *Handler) ensureProxyPoolEntry(proxyURL string) (string, error) {
+	proxyURL, err := normalizeProxyURL(proxyURL)
+	if err != nil {
+		return "", err
+	}
+	if proxyURL == "" {
+		return "", nil
+	}
+	store, err := h.proxyStoreForHandler()
+	if err != nil {
+		return "", err
+	}
+	entries, err := store.load()
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.URL) == proxyURL {
+			if entry.LastChecked == "" {
+				h.startProxyCheck(store, entry.ID, proxyURL)
+			}
+			return proxyURL, nil
+		}
+	}
+	id := uuid.New().String()
+	entries = append(entries, ProxyEntry{
+		ID:    id,
+		URL:   proxyURL,
+		Label: "imported",
+	})
+	if err := store.save(entries); err != nil {
+		return "", err
+	}
+	h.startProxyCheck(store, id, proxyURL)
+	return proxyURL, nil
+}
+
 // ---- HTTP handlers ----
 
-// detectProxyRegion dials ipinfo.io/json through the given proxy URL and returns
-// a "COUNTRY:Region" label (e.g. "US:California").  Returns "" on any failure
-// (best-effort; callers should not block on this).
-func detectProxyRegion(ctx context.Context, proxyURL string) string {
+type proxyCheckResult struct {
+	Available bool
+	Error     string
+	IP        string
+	Country   string
+	Region    string
+	City      string
+	Group     string
+}
+
+// detectProxyInfo dials ipinfo.io/json through the given proxy URL and returns
+// availability + geo details. It is best-effort and bounded by caller context.
+func detectProxyInfo(ctx context.Context, proxyURL string) proxyCheckResult {
+	result := proxyCheckResult{}
 	transport := &http.Transport{}
 	if proxyURL != "" {
 		parsed, err := url.Parse(proxyURL)
 		if err == nil {
 			transport.Proxy = http.ProxyURL(parsed)
+		} else {
+			result.Error = err.Error()
+			return result
 		}
 	}
 	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://ipinfo.io/json", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, proxyIPInfoURL, nil)
 	if err != nil {
-		return ""
+		result.Error = err.Error()
+		return result
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return ""
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	if resp.StatusCode != http.StatusOK {
+		result.Error = fmt.Sprintf("ipinfo status %d", resp.StatusCode)
+		_ = resp.Body.Close()
+		return result
 	}
 	defer func() {
 		if cerr := resp.Body.Close(); cerr != nil {
@@ -153,22 +300,68 @@ func detectProxyRegion(ctx context.Context, proxyURL string) string {
 		}
 	}()
 	var info struct {
+		IP      string `json:"ip"`
+		City    string `json:"city"`
 		Country string `json:"country"`
 		Region  string `json:"region"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return ""
+		result.Error = err.Error()
+		return result
 	}
+	result.Available = true
+	result.IP = strings.TrimSpace(info.IP)
+	result.Country = strings.TrimSpace(info.Country)
+	result.Region = strings.TrimSpace(info.Region)
+	result.City = strings.TrimSpace(info.City)
 	switch {
 	case info.Country != "" && info.Region != "":
-		return info.Country + ":" + info.Region
+		result.Group = info.Country + ":" + info.Region
 	case info.Country != "":
-		return info.Country
+		result.Group = info.Country
 	case info.Region != "":
-		return info.Region
-	default:
-		return ""
+		result.Group = info.Region
 	}
+	return result
+}
+
+func (h *Handler) startProxyCheck(store *proxyStore, id, proxyURL string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = h.refreshProxyInfo(ctx, store, id, proxyURL)
+	}()
+}
+
+func (h *Handler) refreshProxyInfo(ctx context.Context, store *proxyStore, id, proxyURL string) error {
+	checkedAt := time.Now().UTC().Format(time.RFC3339)
+	info := detectProxyInfo(ctx, proxyURL)
+	entries, err := store.load()
+	if err != nil {
+		return err
+	}
+	updated := false
+	for i := range entries {
+		if entries[i].ID != id {
+			continue
+		}
+		entries[i].Available = &info.Available
+		entries[i].CheckError = info.Error
+		entries[i].LastChecked = checkedAt
+		entries[i].IP = info.IP
+		entries[i].Country = info.Country
+		entries[i].Region = info.Region
+		entries[i].City = info.City
+		if info.Group != "" && strings.TrimSpace(entries[i].Group) == "" {
+			entries[i].Group = info.Group
+		}
+		updated = true
+		break
+	}
+	if !updated {
+		return nil
+	}
+	return store.save(entries)
 }
 
 // GetProxies handles GET /v0/management/proxies
@@ -210,7 +403,12 @@ func (h *Handler) PostProxy(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	req.URL = strings.TrimSpace(req.URL)
+	normalizedURL, err := normalizeProxyURL(req.URL)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	req.URL = normalizedURL
 	if req.URL == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "url is required"})
 		return
@@ -233,33 +431,7 @@ func (h *Handler) PostProxy(c *gin.Context) {
 		return
 	}
 
-	// Auto-detect region via ipinfo.io if the caller did not provide one.
-	// This is done after the save so the proxy is persisted even if geo lookup fails.
-	if req.Group == "" {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			region := detectProxyRegion(ctx, req.URL)
-			if region == "" {
-				return
-			}
-			entries2, err := store.load()
-			if err != nil {
-				return
-			}
-			updated := false
-			for i, e := range entries2 {
-				if e.ID == req.ID && e.Group == "" {
-					entries2[i].Group = region
-					updated = true
-					break
-				}
-			}
-			if updated {
-				_ = store.save(entries2)
-			}
-		}()
-	}
+	h.startProxyCheck(store, req.ID, req.URL)
 
 	c.JSON(http.StatusCreated, req)
 }
@@ -276,12 +448,24 @@ func (h *Handler) PutProxy(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	req.URL = strings.TrimSpace(req.URL)
+	normalizedURL, err := normalizeProxyURL(req.URL)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	req.URL = normalizedURL
 	if req.URL == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "url is required"})
 		return
 	}
 	req.ID = id
+	req.Available = nil
+	req.CheckError = ""
+	req.LastChecked = ""
+	req.IP = ""
+	req.Country = ""
+	req.Region = ""
+	req.City = ""
 
 	store, err := h.proxyStoreForHandler()
 	if err != nil {
@@ -309,6 +493,7 @@ func (h *Handler) PutProxy(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	h.startProxyCheck(store, req.ID, req.URL)
 	c.JSON(http.StatusOK, req)
 }
 
@@ -429,5 +614,82 @@ func (h *Handler) PostProxyAssign(c *gin.Context) {
 		"proxy_url": proxy.URL,
 		"updated":   updated,
 		"not_found": notFound,
+	})
+}
+
+// PostProxyAutoAssign assigns enabled/available proxies to auth records that do
+// not have a per-auth proxy_url. This migrates accounts off a global proxy.
+func (h *Handler) PostProxyAutoAssign(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth manager unavailable"})
+		return
+	}
+	store, err := h.proxyStoreForHandler()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	entries, err := store.load()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	proxies := activeProxyEntries(entries)
+	if len(proxies) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no enabled available proxies"})
+		return
+	}
+
+	auths := h.authManager.List()
+	assignedCount := map[string]int{}
+	for url, ids := range assignedToMap(auths) {
+		assignedCount[url] = len(ids)
+	}
+
+	ctx := c.Request.Context()
+	now := time.Now()
+	var updated []string
+	var skipped []string
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if strings.TrimSpace(auth.ProxyURL) != "" {
+			skipped = append(skipped, auth.ID)
+			continue
+		}
+		best := proxies[0]
+		bestCount := assignedCount[best.URL]
+		for _, candidate := range proxies[1:] {
+			count := assignedCount[candidate.URL]
+			if count < bestCount {
+				best = candidate
+				bestCount = count
+			}
+		}
+		auth.ProxyURL = best.URL
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		auth.Metadata["proxy_url"] = best.URL
+		auth.UpdatedAt = now
+		if _, errUpdate := h.authManager.Update(ctx, auth); errUpdate != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("update auth %s: %v", auth.ID, errUpdate)})
+			return
+		}
+		assignedCount[best.URL]++
+		updated = append(updated, auth.ID)
+	}
+	if updated == nil {
+		updated = []string{}
+	}
+	if skipped == nil {
+		skipped = []string{}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status":      "ok",
+		"updated":     updated,
+		"skipped":     skipped,
+		"proxy_count": len(proxies),
 	})
 }

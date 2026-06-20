@@ -1,0 +1,6 @@
+[submodule "third_party/gpt-session-convert"]
+	path = third_party/gpt-session-convert
+	url = https://github.com/LunFengChen/gpt-session-convert
+[submodule "third_party/cpamc"]
+	path = third_party/cpamc
+	url = https://github.com/LunFengChen/CPA-Manager

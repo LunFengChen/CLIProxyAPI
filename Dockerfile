@@ -18,11 +18,12 @@ RUN CGO_ENABLED=1 GOOS=linux go build -buildvcs=false -ldflags="-s -w -X 'main.V
 
 FROM debian:bookworm
 
-RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates nodejs && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir /CLIProxyAPI
 
 COPY --from=builder ./app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
+COPY --from=builder ./app/third_party/gpt-session-convert /CLIProxyAPI/third_party/gpt-session-convert
 
 COPY config.example.yaml /CLIProxyAPI/config.example.yaml
 
