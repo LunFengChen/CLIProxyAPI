@@ -23,6 +23,8 @@ config.yaml
 
 # Development/editor
 bin
+!third_party/gpt-session-convert/bin/
+!third_party/gpt-session-convert/bin/**
 .vscode
 .claude
 .codex
