@@ -145,20 +145,23 @@ func activeProxyEntries(entries []ProxyEntry) []ProxyEntry {
 	return out
 }
 
-// pickProxyURLForImportedAuth chooses the least-assigned enabled proxy from the
-// persisted proxy pool. Empty return means the import should proceed unproxied.
-func (h *Handler) pickProxyURLForImportedAuth() string {
+type proxyAllocator struct {
+	candidates []ProxyEntry
+	assigned   map[string]int
+}
+
+func (h *Handler) newProxyAllocator() *proxyAllocator {
 	store, err := h.proxyStoreForHandler()
 	if err != nil {
-		return ""
+		return nil
 	}
 	entries, err := store.load()
 	if err != nil {
-		return ""
+		return nil
 	}
 	candidates := activeProxyEntries(entries)
 	if len(candidates) == 0 {
-		return ""
+		return nil
 	}
 
 	assigned := map[string]int{}
@@ -167,17 +170,30 @@ func (h *Handler) pickProxyURLForImportedAuth() string {
 			assigned[url] = len(ids)
 		}
 	}
+	return &proxyAllocator{candidates: candidates, assigned: assigned}
+}
 
-	best := candidates[0]
-	bestCount := assigned[best.URL]
-	for _, candidate := range candidates[1:] {
-		count := assigned[candidate.URL]
+func (a *proxyAllocator) Next() string {
+	if a == nil || len(a.candidates) == 0 {
+		return ""
+	}
+	best := a.candidates[0]
+	bestCount := a.assigned[best.URL]
+	for _, candidate := range a.candidates[1:] {
+		count := a.assigned[candidate.URL]
 		if count < bestCount {
 			best = candidate
 			bestCount = count
 		}
 	}
+	a.assigned[best.URL]++
 	return best.URL
+}
+
+// pickProxyURLForImportedAuth chooses the least-assigned enabled proxy from the
+// persisted proxy pool. Empty return means the import should proceed unproxied.
+func (h *Handler) pickProxyURLForImportedAuth() string {
+	return h.newProxyAllocator().Next()
 }
 
 func normalizeProxyURL(raw string) (string, error) {

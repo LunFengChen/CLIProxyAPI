@@ -201,6 +201,53 @@ func TestImportConvertedCPAAutos_DifferentEmailsDoNotGetArtificialSuffix(t *test
 	}
 }
 
+func TestImportConvertedCPAAutos_DistributesProxyPoolAcrossImportedAccounts(t *testing.T) {
+	authDir := t.TempDir()
+	store, err := newProxyStore(authDir)
+	if err != nil {
+		t.Fatalf("proxy store: %v", err)
+	}
+	available := true
+	if err := store.save([]ProxyEntry{
+		{ID: "p1", URL: "socks5://proxy-a.local:443", Available: &available},
+		{ID: "p2", URL: "socks5://proxy-b.local:443", Available: &available},
+	}); err != nil {
+		t.Fatalf("save proxies: %v", err)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	converted := []map[string]any{
+		{"type": "codex", "email": "one@example.com", "access_token": "tok-one"},
+		{"type": "codex", "email": "two@example.com", "access_token": "tok-two"},
+		{"type": "codex", "email": "three@example.com", "access_token": "tok-three"},
+		{"type": "codex", "email": "four@example.com", "access_token": "tok-four"},
+	}
+	result, err := h.importConvertedCPAAutos(context.Background(), sessionTextImportRequest{}, "", converted)
+	if err != nil {
+		t.Fatalf("import converted: %v", err)
+	}
+	if result.Created != 4 || result.Failed != 0 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+
+	counts := map[string]int{}
+	for _, name := range result.Files {
+		data, err := os.ReadFile(filepath.Join(authDir, name))
+		if err != nil {
+			t.Fatalf("read imported file %s: %v", name, err)
+		}
+		var stored map[string]any
+		if err := json.Unmarshal(data, &stored); err != nil {
+			t.Fatalf("decode imported file %s: %v", name, err)
+		}
+		counts[cpaString(stored, "proxy_url")]++
+	}
+	if counts["socks5://proxy-a.local:443"] != 2 || counts["socks5://proxy-b.local:443"] != 2 {
+		t.Fatalf("proxy distribution = %#v, want 2/2 split", counts)
+	}
+}
+
 func TestBuildCPAImportFileNameReadsCodexPlanFromAccessToken(t *testing.T) {
 	token := unsignedJWT(t, map[string]any{
 		"https://api.openai.com/auth": map[string]any{

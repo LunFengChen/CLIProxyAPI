@@ -63,8 +63,6 @@ func (h *Handler) ImportSessionText(c *gin.Context) {
 			return
 		}
 		proxyURL = normalizedProxyURL
-	} else {
-		proxyURL = h.pickProxyURLForImportedAuth()
 	}
 
 	converted, err := convertSessionTextWithSubmoduleCLI(c.Request.Context(), req.Content, proxyURL)
@@ -131,12 +129,20 @@ func (h *Handler) importConvertedCPAAutos(ctx context.Context, req sessionTextIm
 	result := sessionTextImportResult{Total: len(converted), ProxyURL: proxyURL}
 	seen := make(map[string]struct{})
 	reservedNames := make(map[string]struct{})
+	var allocator *proxyAllocator
+	if proxyURL == "" {
+		allocator = h.newProxyAllocator()
+	}
 	for i, cpa := range converted {
 		if strings.TrimSpace(cpaString(cpa, "type")) == "" {
 			cpa["type"] = "codex"
 		}
 		if proxyURL != "" && strings.TrimSpace(cpaString(cpa, "proxy_url")) == "" {
 			cpa["proxy_url"] = proxyURL
+		} else if proxyURL == "" && strings.TrimSpace(cpaString(cpa, "proxy_url")) == "" {
+			if assignedProxyURL := allocator.Next(); assignedProxyURL != "" {
+				cpa["proxy_url"] = assignedProxyURL
+			}
 		}
 		if strings.TrimSpace(cpaString(cpa, "access_token")) == "" {
 			result.Failed++
