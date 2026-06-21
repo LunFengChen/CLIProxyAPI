@@ -23,6 +23,7 @@ const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
 	DefaultAuthDir               = "~/.cli-proxy-api"
+	DefaultProxyPoolDir          = "~/.cli-proxy-api-proxys"
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -48,6 +49,9 @@ type Config struct {
 
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
+
+	// ProxyPoolDir is the directory where proxy pool state is stored.
+	ProxyPoolDir string `yaml:"proxy-pool-dir" json:"-"`
 
 	// Debug enables or disables debug-level logging and other debug features.
 	Debug bool `yaml:"debug" json:"debug"`
@@ -684,6 +688,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
+	cfg.ProxyPoolDir = DefaultProxyPoolDir
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -739,6 +744,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
+	}
+
+	cfg.ProxyPoolDir = strings.TrimSpace(cfg.ProxyPoolDir)
+	if cfg.ProxyPoolDir == "" {
+		cfg.ProxyPoolDir = DefaultProxyPoolDir
 	}
 
 	cfg.NormalizePluginsConfig()

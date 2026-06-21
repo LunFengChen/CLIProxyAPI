@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -42,38 +43,58 @@ type proxyPoolResponse struct {
 	AssignedTo []string `json:"assigned_to"`
 }
 
-// proxyStore handles atomic read/write of proxies.json inside auth-dir.
+// proxyStore handles atomic read/write of one JSON file per proxy inside proxy-pool-dir.
 type proxyStore struct {
 	mu   sync.RWMutex
 	path string
 }
 
-func newProxyStore(authDir string) (*proxyStore, error) {
-	resolved, err := util.ResolveAuthDir(authDir)
+func newProxyStore(proxyPoolDir string) (*proxyStore, error) {
+	resolved, err := util.ResolveProxyPoolDir(proxyPoolDir)
 	if err != nil {
-		return nil, fmt.Errorf("proxy store: resolve auth dir: %w", err)
+		return nil, fmt.Errorf("proxy store: resolve proxy pool dir: %w", err)
 	}
 	if err := os.MkdirAll(resolved, 0o700); err != nil {
 		return nil, fmt.Errorf("proxy store: mkdir: %w", err)
 	}
-	return &proxyStore{path: filepath.Join(resolved, "proxies.json")}, nil
+	return &proxyStore{path: resolved}, nil
 }
 
 func (s *proxyStore) load() ([]ProxyEntry, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	data, err := os.ReadFile(s.path)
+	entries, err := os.ReadDir(s.path)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("proxy store: read: %w", err)
+		return nil, fmt.Errorf("proxy store: read dir: %w", err)
 	}
-	var entries []ProxyEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, fmt.Errorf("proxy store: unmarshal: %w", err)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	out := make([]ProxyEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry == nil || entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".json") || strings.EqualFold(name, "proxies.json") {
+			continue
+		}
+		fullPath := filepath.Join(s.path, name)
+		data, errRead := os.ReadFile(fullPath)
+		if errRead != nil {
+			return nil, fmt.Errorf("proxy store: read %s: %w", name, errRead)
+		}
+		var proxy ProxyEntry
+		if errUnmarshal := json.Unmarshal(data, &proxy); errUnmarshal != nil {
+			return nil, fmt.Errorf("proxy store: unmarshal %s: %w", name, errUnmarshal)
+		}
+		if strings.TrimSpace(proxy.ID) == "" {
+			proxy.ID = strings.TrimSuffix(name, filepath.Ext(name))
+		}
+		out = append(out, proxy)
 	}
-	return entries, nil
+	return out, nil
 }
 
 func (s *proxyStore) save(entries []ProxyEntry) error {
@@ -82,18 +103,71 @@ func (s *proxyStore) save(entries []ProxyEntry) error {
 	if entries == nil {
 		entries = []ProxyEntry{}
 	}
-	raw, err := json.MarshalIndent(entries, "", "  ")
+	if err := os.MkdirAll(s.path, 0o700); err != nil {
+		return fmt.Errorf("proxy store: mkdir: %w", err)
+	}
+	keep := make(map[string]struct{}, len(entries))
+	for i := range entries {
+		if strings.TrimSpace(entries[i].ID) == "" {
+			entries[i].ID = uuid.New().String()
+		}
+		fileName := proxyEntryFileName(entries[i].ID)
+		keep[fileName] = struct{}{}
+		raw, errMarshal := json.MarshalIndent(entries[i], "", "  ")
+		if errMarshal != nil {
+			return fmt.Errorf("proxy store: marshal %s: %w", fileName, errMarshal)
+		}
+		raw = append(raw, '\n')
+		fullPath := filepath.Join(s.path, fileName)
+		tmp := fullPath + ".tmp"
+		if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
+			return fmt.Errorf("proxy store: write tmp %s: %w", fileName, errWrite)
+		}
+		if errRename := os.Rename(tmp, fullPath); errRename != nil {
+			return fmt.Errorf("proxy store: rename %s: %w", fileName, errRename)
+		}
+	}
+	existing, err := os.ReadDir(s.path)
 	if err != nil {
-		return fmt.Errorf("proxy store: marshal: %w", err)
+		return fmt.Errorf("proxy store: read dir for cleanup: %w", err)
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return fmt.Errorf("proxy store: write tmp: %w", err)
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		return fmt.Errorf("proxy store: rename: %w", err)
+	for _, entry := range existing {
+		if entry == nil || entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".json") || strings.EqualFold(name, "proxies.json") {
+			continue
+		}
+		if _, ok := keep[name]; ok {
+			continue
+		}
+		if errRemove := os.Remove(filepath.Join(s.path, name)); errRemove != nil && !os.IsNotExist(errRemove) {
+			return fmt.Errorf("proxy store: remove stale %s: %w", name, errRemove)
+		}
 	}
 	return nil
+}
+
+func proxyEntryFileName(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		id = uuid.New().String()
+	}
+	var b strings.Builder
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	name := strings.Trim(b.String(), ".")
+	if name == "" {
+		name = uuid.New().String()
+	}
+	return name + ".json"
 }
 
 // ---- Handler wiring ----
@@ -119,11 +193,11 @@ func (h *Handler) proxyStoreForHandler() (*proxyStore, error) {
 	v, _ := handlerProxyStores.LoadOrStore(h, &proxyStoreCache{})
 	c := v.(*proxyStoreCache)
 	c.once.Do(func() {
-		authDir := ""
+		proxyPoolDir := ""
 		if h.cfg != nil {
-			authDir = strings.TrimSpace(h.cfg.AuthDir)
+			proxyPoolDir = strings.TrimSpace(h.cfg.ProxyPoolDir)
 		}
-		c.store, c.err = newProxyStore(authDir)
+		c.store, c.err = newProxyStore(proxyPoolDir)
 	})
 	return c.store, c.err
 }

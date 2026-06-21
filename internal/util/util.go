@@ -78,12 +78,29 @@ func ResolveAuthDir(authDir string) (string, error) {
 	if authDir == "" {
 		authDir = config.DefaultAuthDir
 	}
-	if strings.HasPrefix(authDir, "~") {
+	return resolveTildePath(authDir, "resolve auth dir")
+}
+
+// ResolveProxyPoolDir normalizes the proxy pool state directory path.
+// It expands a leading tilde (~) to the user's home directory and returns a cleaned path.
+// If proxyPoolDir is empty, it defaults to ~/.cli-proxy-api-proxys.
+func ResolveProxyPoolDir(proxyPoolDir string) (string, error) {
+	if proxyPoolDir == "" {
+		proxyPoolDir = config.DefaultProxyPoolDir
+	}
+	return resolveTildePath(proxyPoolDir, "resolve proxy pool dir")
+}
+
+func resolveTildePath(pathValue, context string) (string, error) {
+	if pathValue == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(pathValue, "~") {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return "", fmt.Errorf("resolve auth dir: %w", err)
+			return "", fmt.Errorf("%s: %w", context, err)
 		}
-		remainder := strings.TrimPrefix(authDir, "~")
+		remainder := strings.TrimPrefix(pathValue, "~")
 		remainder = strings.TrimLeft(remainder, "/\\")
 		if remainder == "" {
 			return filepath.Clean(home), nil
@@ -91,7 +108,7 @@ func ResolveAuthDir(authDir string) (string, error) {
 		normalized := strings.ReplaceAll(remainder, "\\", "/")
 		return filepath.Clean(filepath.Join(home, filepath.FromSlash(normalized))), nil
 	}
-	return filepath.Clean(authDir), nil
+	return filepath.Clean(pathValue), nil
 }
 
 // CountAuthFiles returns the number of auth records available through the provided Store.

@@ -19,12 +19,16 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
+func testProxyPoolDir(authDir string) string {
+	return authDir + "-proxys"
+}
+
 func TestUploadAuthFile_AutoBindsProxyFromPool(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 
 	authDir := t.TempDir()
 	manager := coreauth.NewManager(nil, nil, nil)
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir, ProxyPoolDir: testProxyPoolDir(authDir)}, manager)
 	if _, err := h.ensureProxyPoolEntry("socks5://127.0.0.1:1080"); err != nil {
 		t.Fatalf("seed proxy pool: %v", err)
 	}
@@ -62,7 +66,7 @@ func TestImportSessionText_ExtractsNoisyJSONAddsProxyAndImportsCPA(t *testing.T)
 
 	authDir := t.TempDir()
 	manager := coreauth.NewManager(nil, nil, nil)
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir, ProxyPoolDir: testProxyPoolDir(authDir)}, manager)
 	expires := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	content := `junk {} more
 {"user":{"email":"alpha@example.com"},"account":{"id":"acc_123","planType":"plus"},"expires":"` + expires + `","accessToken":"access-token","sessionToken":"session-token"}
@@ -104,7 +108,7 @@ trailing {bad`
 	if stored["id_token_synthetic"] != true {
 		t.Fatalf("expected synthetic id token marker, got %#v", stored["id_token_synthetic"])
 	}
-	proxies, err := newProxyStore(authDir)
+	proxies, err := newProxyStore(testProxyPoolDir(authDir))
 	if err != nil {
 		t.Fatalf("proxy store: %v", err)
 	}
@@ -122,7 +126,7 @@ func TestImportSessionText_DoesNotDedupeSameEmailDifferentTokens(t *testing.T) {
 
 	authDir := t.TempDir()
 	manager := coreauth.NewManager(nil, nil, nil)
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir, ProxyPoolDir: testProxyPoolDir(authDir)}, manager)
 	expires := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	var content strings.Builder
 	for i := 1; i <= 5; i++ {
@@ -186,7 +190,7 @@ func TestCPAIdentityKeepsDifferentEmailsWithSameAccountID(t *testing.T) {
 func TestImportConvertedCPAAutos_DifferentEmailsDoNotGetArtificialSuffix(t *testing.T) {
 	authDir := t.TempDir()
 	manager := coreauth.NewManager(nil, nil, nil)
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir, ProxyPoolDir: testProxyPoolDir(authDir)}, manager)
 	converted := []map[string]any{
 		{"type": "codex", "email": "one@example.com", "plan_type": "k12", "access_token": "tok-one"},
 		{"type": "codex", "email": "two@example.com", "plan_type": "k12", "access_token": "tok-two"},
@@ -203,7 +207,7 @@ func TestImportConvertedCPAAutos_DifferentEmailsDoNotGetArtificialSuffix(t *test
 
 func TestImportConvertedCPAAutos_DistributesProxyPoolAcrossImportedAccounts(t *testing.T) {
 	authDir := t.TempDir()
-	store, err := newProxyStore(authDir)
+	store, err := newProxyStore(testProxyPoolDir(authDir))
 	if err != nil {
 		t.Fatalf("proxy store: %v", err)
 	}
@@ -216,7 +220,7 @@ func TestImportConvertedCPAAutos_DistributesProxyPoolAcrossImportedAccounts(t *t
 	}
 
 	manager := coreauth.NewManager(nil, nil, nil)
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir, ProxyPoolDir: testProxyPoolDir(authDir)}, manager)
 	converted := []map[string]any{
 		{"type": "codex", "email": "one@example.com", "access_token": "tok-one"},
 		{"type": "codex", "email": "two@example.com", "access_token": "tok-two"},
@@ -287,7 +291,7 @@ func TestStandardAuthFileNameReadsCodexPlanFromAccessToken(t *testing.T) {
 func TestNormalizeAuthFileNamesRenamesExistingFiles(t *testing.T) {
 	authDir := t.TempDir()
 	manager := coreauth.NewManager(nil, nil, nil)
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir, ProxyPoolDir: testProxyPoolDir(authDir)}, manager)
 	files := map[string]string{
 		"1.json":                           `{"type":"codex","email":"one@example.com","plan_type":"k12","access_token":"tok-one"}`,
 		"codex-two@example.com-k12_2.json": `{"type":"codex","email":"two@example.com","plan_type":"k12","access_token":"tok-two"}`,
@@ -336,7 +340,7 @@ func TestProxyCheckRecordsIPInfo(t *testing.T) {
 	defer proxy.Close()
 
 	authDir := t.TempDir()
-	store, err := newProxyStore(authDir)
+	store, err := newProxyStore(testProxyPoolDir(authDir))
 	if err != nil {
 		t.Fatalf("proxy store: %v", err)
 	}
@@ -344,7 +348,7 @@ func TestProxyCheckRecordsIPInfo(t *testing.T) {
 	if err := store.save([]ProxyEntry{entry}); err != nil {
 		t.Fatalf("save proxy: %v", err)
 	}
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, coreauth.NewManager(nil, nil, nil))
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir, ProxyPoolDir: testProxyPoolDir(authDir)}, coreauth.NewManager(nil, nil, nil))
 	if err := h.refreshProxyInfo(context.Background(), store, entry.ID, entry.URL); err != nil {
 		t.Fatalf("refresh proxy: %v", err)
 	}
@@ -362,7 +366,7 @@ func TestProxyCheckRecordsIPInfo(t *testing.T) {
 
 func TestProxyAutoAssignAssignsOnlyAuthsWithoutProxy(t *testing.T) {
 	authDir := t.TempDir()
-	store, err := newProxyStore(authDir)
+	store, err := newProxyStore(testProxyPoolDir(authDir))
 	if err != nil {
 		t.Fatalf("proxy store: %v", err)
 	}
@@ -380,7 +384,7 @@ func TestProxyAutoAssignAssignsOnlyAuthsWithoutProxy(t *testing.T) {
 	if _, err := manager.Register(context.Background(), &coreauth.Auth{ID: "a2", FileName: "a2.json", Provider: "codex", ProxyURL: "http://existing.local:8080"}); err != nil {
 		t.Fatalf("register a2: %v", err)
 	}
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir, ProxyPoolDir: testProxyPoolDir(authDir)}, manager)
 
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
@@ -421,7 +425,7 @@ func TestProxyPoolHealthCheckReassignsAuthsFromUnavailableProxy(t *testing.T) {
 	defer goodProxy.Close()
 
 	authDir := t.TempDir()
-	store, err := newProxyStore(authDir)
+	store, err := newProxyStore(testProxyPoolDir(authDir))
 	if err != nil {
 		t.Fatalf("proxy store: %v", err)
 	}
@@ -442,7 +446,7 @@ func TestProxyPoolHealthCheckReassignsAuthsFromUnavailableProxy(t *testing.T) {
 			t.Fatalf("register %s: %v", auth.ID, err)
 		}
 	}
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir, ProxyPoolDir: testProxyPoolDir(authDir)}, manager)
 
 	if err := h.refreshProxyPoolOnce(context.Background()); err != nil {
 		t.Fatalf("refresh proxy pool: %v", err)
@@ -480,7 +484,7 @@ func TestProxyPoolHealthCheckKeepsAuthsWhenNoReplacementProxy(t *testing.T) {
 	defer badProxy.Close()
 
 	authDir := t.TempDir()
-	store, err := newProxyStore(authDir)
+	store, err := newProxyStore(testProxyPoolDir(authDir))
 	if err != nil {
 		t.Fatalf("proxy store: %v", err)
 	}
@@ -495,7 +499,7 @@ func TestProxyPoolHealthCheckKeepsAuthsWhenNoReplacementProxy(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register auth: %v", err)
 	}
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir, ProxyPoolDir: testProxyPoolDir(authDir)}, manager)
 
 	if err := h.refreshProxyPoolOnce(context.Background()); err != nil {
 		t.Fatalf("refresh proxy pool: %v", err)

@@ -25,6 +25,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
+	cfg.ProxyPoolDir = DefaultProxyPoolDir
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -70,6 +71,11 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
+	}
+
+	cfg.ProxyPoolDir = strings.TrimSpace(cfg.ProxyPoolDir)
+	if cfg.ProxyPoolDir == "" {
+		cfg.ProxyPoolDir = DefaultProxyPoolDir
 	}
 
 	cfg.NormalizePluginsConfig()

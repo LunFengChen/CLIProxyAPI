@@ -35,6 +35,10 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
+# Proxy pool state directory (supports ~ for home directory).
+# Stored separately from auth-dir so proxy files are not scanned as auth files.
+proxy-pool-dir: "~/.cli-proxy-api-proxys"
+
 # API keys for authentication
 api-keys:
   - "your-api-key-1"
